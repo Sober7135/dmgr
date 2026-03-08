@@ -19,6 +19,8 @@ pub struct EntryConfig {
     pub autobuild_order: i32,
     #[serde(default = "default_shell")]
     pub shell: PathBuf,
+    #[serde(default)]
+    pub depends_on: Vec<String>,
 }
 
 impl EntryConfig {
@@ -106,7 +108,8 @@ impl EntrySummary {
                 description: None,
                 autobuild,
                 autobuild_order,
-                shell: PathBuf::from("/bin/sh"),
+                shell: PathBuf::from("sh"),
+                depends_on: Vec::new(),
             },
             paths: EntryPaths::new(root),
         }
@@ -148,7 +151,7 @@ impl CmdOverrideConfig {
 }
 
 fn default_shell() -> PathBuf {
-    PathBuf::from("/bin/sh")
+    PathBuf::from("sh")
 }
 
 fn default_autobuild_order() -> i32 {

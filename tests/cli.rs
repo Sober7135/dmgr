@@ -22,6 +22,17 @@ fn create_workspace(tempdir: &TempDir, name: &str) -> PathBuf {
     path
 }
 
+fn create_import_workspace(root: &Path, name: &str) -> PathBuf {
+    let path = root.join(name);
+    fs::create_dir_all(&path).expect("create import workspace");
+    fs::write(path.join("Dockerfile"), "FROM alpine:latest\n").expect("write Dockerfile");
+    path
+}
+
+fn write_entry_config(path: &Path, content: &str) {
+    fs::write(path, content).expect("write entry config");
+}
+
 fn write_script(path: &Path, content: &str) {
     fs::write(path, content).expect("write script");
     #[cfg(unix)]
@@ -118,6 +129,258 @@ fn create_entry_keeps_existing_external_dockerfile() {
 }
 
 #[test]
+fn import_single_directory_creates_external_entry() {
+    let tempdir = TempDir::new().expect("create tempdir");
+    let root = tempdir.path().join("dmgr");
+    let import_root = tempdir.path().join("dockerfiles");
+    let workspace = create_import_workspace(&import_root, "dev");
+    let build_script = "#!/usr/bin/env sh\nset -eu\ndocker buildx build . --network host -t dev\n";
+    fs::write(workspace.join("build.sh"), build_script).expect("write build script");
+
+    let mut command = bin();
+    set_root(command.arg("import").arg(&workspace), &root);
+    command.assert().success();
+
+    let entry_root = root.join("entries/dev");
+    let config = fs::read_to_string(entry_root.join("entry.toml")).expect("read config");
+    assert!(config.contains("managed = false"));
+    assert!(config.contains(&format!(
+        "workspace = \"{}\"",
+        workspace.canonicalize().expect("canonical workspace").display()
+    )));
+    assert_eq!(
+        fs::read_to_string(entry_root.join("build.sh")).expect("read build"),
+        build_script
+    );
+    assert!(entry_root.join("run.sh").exists());
+}
+
+#[test]
+fn import_parent_directory_scans_importable_children() {
+    let tempdir = TempDir::new().expect("create tempdir");
+    let root = tempdir.path().join("dmgr");
+    let import_root = tempdir.path().join("dockerfiles");
+    fs::create_dir_all(&import_root).expect("create import root");
+
+    let alpha = create_import_workspace(&import_root, "alpha");
+    let beta = create_import_workspace(&import_root, "beta");
+    fs::write(
+        alpha.join("build.sh"),
+        "#!/usr/bin/env sh\nset -eu\necho alpha\n",
+    )
+    .expect("write build");
+    fs::create_dir_all(import_root.join("notes")).expect("create ignored dir");
+    fs::write(import_root.join("notes/README.md"), "ignore\n").expect("write README");
+
+    let mut command = bin();
+    set_root(command.arg("import").arg(&import_root), &root);
+    let assert = command.assert().success();
+    let output = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
+    let lines: Vec<_> = output.lines().collect();
+
+    assert_eq!(lines.len(), 2);
+    assert_eq!(lines[0], root.join("entries/alpha").display().to_string());
+    assert_eq!(lines[1], root.join("entries/beta").display().to_string());
+    assert!(root.join("entries/alpha/entry.toml").exists());
+    assert!(root.join("entries/beta/entry.toml").exists());
+    let alpha_config =
+        fs::read_to_string(root.join("entries/alpha/entry.toml")).expect("read alpha config");
+    assert!(alpha_config.contains("depends_on = []"));
+    assert_eq!(
+        fs::read_to_string(root.join("entries/beta/build.sh")).expect("read beta build"),
+        "#!/usr/bin/env sh\nset -eu\ndocker build -t beta -f Dockerfile .\n"
+    );
+    assert!(beta.join("Dockerfile").exists());
+}
+
+#[test]
+fn import_infers_dependencies_from_dockerfile_from() {
+    let tempdir = TempDir::new().expect("create tempdir");
+    let root = tempdir.path().join("dmgr");
+    let import_root = tempdir.path().join("dockerfiles");
+    fs::create_dir_all(&import_root).expect("create import root");
+
+    create_import_workspace(&import_root, "dev");
+    let app = import_root.join("graphar-arch-dev");
+    fs::create_dir_all(&app).expect("create app workspace");
+    fs::write(app.join("Dockerfile"), "FROM dev\nRUN echo app\n").expect("write Dockerfile");
+
+    let mut command = bin();
+    set_root(command.arg("import").arg(&import_root), &root);
+    command.assert().success();
+
+    let config =
+        fs::read_to_string(root.join("entries/graphar-arch-dev/entry.toml")).expect("read config");
+    assert!(config.contains("depends_on = [\"dev\"]"));
+}
+
+#[test]
+fn build_recursively_builds_dependencies_first() {
+    let tempdir = TempDir::new().expect("create tempdir");
+    let root = tempdir.path().join("dmgr");
+    let import_root = tempdir.path().join("dockerfiles");
+    let log = tempdir.path().join("build.log");
+    fs::create_dir_all(&import_root).expect("create import root");
+
+    let dev = create_import_workspace(&import_root, "dev");
+    fs::write(
+        dev.join("build.sh"),
+        format!(
+            "#!/usr/bin/env sh\nset -eu\necho dev >> {}\n",
+            log.display()
+        ),
+    )
+    .expect("write dev build");
+
+    let app = import_root.join("graphar-arch-dev");
+    fs::create_dir_all(&app).expect("create app workspace");
+    fs::write(app.join("Dockerfile"), "FROM dev\nRUN echo app\n").expect("write Dockerfile");
+    fs::write(
+        app.join("build.sh"),
+        format!(
+            "#!/usr/bin/env sh\nset -eu\necho graphar-arch-dev >> {}\n",
+            log.display()
+        ),
+    )
+    .expect("write app build");
+
+    let mut import = bin();
+    set_root(import.arg("import").arg(&import_root), &root);
+    import.assert().success();
+
+    let mut build = bin();
+    set_root(build.arg("build").arg("graphar-arch-dev"), &root);
+    build.assert().success();
+
+    let lines: Vec<_> = fs::read_to_string(&log)
+        .expect("read build log")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines, vec!["dev", "graphar-arch-dev"]);
+}
+
+#[test]
+fn autobuild_uses_dependency_order() {
+    let tempdir = TempDir::new().expect("create tempdir");
+    let root = tempdir.path().join("dmgr");
+    let import_root = tempdir.path().join("dockerfiles");
+    let log = tempdir.path().join("autobuild.log");
+    fs::create_dir_all(&import_root).expect("create import root");
+
+    let dev = create_import_workspace(&import_root, "dev");
+    fs::write(
+        dev.join("build.sh"),
+        format!(
+            "#!/usr/bin/env sh\nset -eu\necho dev >> {}\n",
+            log.display()
+        ),
+    )
+    .expect("write dev build");
+
+    let app = import_root.join("graphar-arch-dev");
+    fs::create_dir_all(&app).expect("create app workspace");
+    fs::write(app.join("Dockerfile"), "FROM dev\nRUN echo app\n").expect("write Dockerfile");
+    fs::write(
+        app.join("build.sh"),
+        format!(
+            "#!/usr/bin/env sh\nset -eu\necho graphar-arch-dev >> {}\n",
+            log.display()
+        ),
+    )
+    .expect("write app build");
+
+    let mut import = bin();
+    set_root(import.arg("import").arg(&import_root), &root);
+    import.assert().success();
+
+    let dev_config = root.join("entries/dev/entry.toml");
+    let app_config = root.join("entries/graphar-arch-dev/entry.toml");
+    write_entry_config(
+        &dev_config,
+        &fs::read_to_string(&dev_config)
+            .expect("read dev config")
+            .replace("autobuild = false", "autobuild = true"),
+    );
+    write_entry_config(
+        &app_config,
+        &fs::read_to_string(&app_config)
+            .expect("read app config")
+            .replace("autobuild = false", "autobuild = true"),
+    );
+
+    let mut autobuild = bin();
+    set_root(autobuild.arg("build").arg("--autobuild"), &root);
+    autobuild.assert().success();
+
+    let lines: Vec<_> = fs::read_to_string(&log)
+        .expect("read autobuild log")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines, vec!["dev", "graphar-arch-dev"]);
+}
+
+#[test]
+fn build_all_builds_all_entries_in_dependency_order() {
+    let tempdir = TempDir::new().expect("create tempdir");
+    let root = tempdir.path().join("dmgr");
+    let import_root = tempdir.path().join("dockerfiles");
+    let log = tempdir.path().join("build-all.log");
+    fs::create_dir_all(&import_root).expect("create import root");
+
+    let dev = create_import_workspace(&import_root, "dev");
+    fs::write(
+        dev.join("build.sh"),
+        format!(
+            "#!/usr/bin/env sh\nset -eu\necho dev >> {}\n",
+            log.display()
+        ),
+    )
+    .expect("write dev build");
+
+    let app = import_root.join("graphar-arch-dev");
+    fs::create_dir_all(&app).expect("create app workspace");
+    fs::write(app.join("Dockerfile"), "FROM dev\nRUN echo app\n").expect("write Dockerfile");
+    fs::write(
+        app.join("build.sh"),
+        format!(
+            "#!/usr/bin/env sh\nset -eu\necho graphar-arch-dev >> {}\n",
+            log.display()
+        ),
+    )
+    .expect("write app build");
+
+    let tools = create_import_workspace(&import_root, "tools");
+    fs::write(
+        tools.join("build.sh"),
+        format!(
+            "#!/usr/bin/env sh\nset -eu\necho tools >> {}\n",
+            log.display()
+        ),
+    )
+    .expect("write tools build");
+
+    let mut import = bin();
+    set_root(import.arg("import").arg(&import_root), &root);
+    import.assert().success();
+
+    let mut build_all = bin();
+    set_root(build_all.arg("build-all"), &root);
+    build_all.assert().success();
+
+    let lines: Vec<_> = fs::read_to_string(&log)
+        .expect("read build-all log")
+        .lines()
+        .map(str::to_string)
+        .collect();
+    assert_eq!(lines.len(), 3);
+    assert_eq!(lines[0], "dev");
+    assert_eq!(lines[1], "graphar-arch-dev");
+    assert_eq!(lines[2], "tools");
+}
+
+#[test]
 fn rm_deletes_managed_entry_root() {
     let tempdir = TempDir::new().expect("create tempdir");
     let root = tempdir.path().join("dmgr");
@@ -194,7 +457,7 @@ fn edit_file_uses_editor_from_environment() {
     fs::write(
         &editor,
         format!(
-            "#!/bin/sh\nset -eu\necho \"$1\" > {}\n",
+            "#!/usr/bin/env sh\nset -eu\necho \"$1\" > {}\n",
             editor_log.display()
         ),
     )
@@ -207,7 +470,7 @@ fn edit_file_uses_editor_from_environment() {
 
     let mut command = bin();
     set_root(command.arg("file").arg("edit").arg("dev"), &root);
-    command.env("EDITOR", &editor);
+    command.env_remove("VISUAL").env("EDITOR", &editor);
 
     command.assert().success();
 
@@ -231,7 +494,7 @@ fn cmd_edit_with_cwd_creates_override_from_default() {
     write_script(
         &editor,
         &format!(
-            "#!/bin/sh\nset -eu\necho \"$1\" > {}\n",
+            "#!/usr/bin/env sh\nset -eu\necho \"$1\" > {}\n",
             editor_log.display()
         ),
     );
@@ -248,7 +511,10 @@ fn cmd_edit_with_cwd_creates_override_from_default() {
         command.arg("cmd").arg("edit").arg("dev").arg("--cwd"),
         &root,
     );
-    command.env("EDITOR", &editor).current_dir(&scope);
+    command
+        .env_remove("VISUAL")
+        .env("EDITOR", &editor)
+        .current_dir(&scope);
     command.assert().success();
 
     let override_root = root.join("entries/dev/cmd-overrides");
@@ -297,7 +563,7 @@ fn build_autobuild_runs_entries_in_order() {
     fs::write(
         &docker,
         format!(
-            "#!/bin/sh\nset -eu\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> {}\n",
+            "#!/usr/bin/env sh\nset -eu\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> {}\n",
             log.display()
         ),
     )
@@ -365,7 +631,7 @@ fn run_uses_default_cmd_when_no_override_matches() {
     write_script(
         &default_run,
         &format!(
-            "#!/bin/sh\nset -eu\nprintf 'default|%s\\n' \"$PWD\" >> {}\n",
+            "#!/usr/bin/env sh\nset -eu\nprintf 'default|%s\\n' \"$PWD\" >> {}\n",
             log.display()
         ),
     );
@@ -395,7 +661,7 @@ fn run_uses_cwd_override_when_present() {
     write_script(
         &editor,
         &format!(
-            "#!/bin/sh\nset -eu\ncat <<'EOF' > \"$1\"\n#!/bin/sh\nset -eu\nprintf 'override|%s\\n' \"$PWD\" >> {}\nEOF\n",
+            "#!/usr/bin/env sh\nset -eu\ncat <<'EOF' > \"$1\"\n#!/usr/bin/env sh\nset -eu\nprintf 'override|%s\\n' \"$PWD\" >> {}\nEOF\n",
             log.display()
         ),
     );
@@ -413,7 +679,7 @@ fn run_uses_cwd_override_when_present() {
             .arg(&scope),
         &root,
     );
-    edit.env("EDITOR", &editor);
+    edit.env_remove("VISUAL").env("EDITOR", &editor);
     edit.assert().success();
 
     let mut run = bin();

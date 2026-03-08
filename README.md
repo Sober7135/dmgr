@@ -6,7 +6,7 @@
 
 Each entry lives under `DMGR_ROOT/entries/<name>` and contains:
 
-- `entry.toml`: metadata such as `workspace`, `managed`, `autobuild`, and shell
+- `entry.toml`: metadata such as `workspace`, `managed`, `autobuild`, `depends_on`, and shell
 - `build.sh`: the build workflow
 - `run.sh`: the default run workflow
 - `cmd-overrides/`: path-scoped run command overrides
@@ -15,6 +15,18 @@ Each entry lives under `DMGR_ROOT/entries/<name>` and contains:
 By default `DMGR_ROOT` is resolved as `$HOME/.config/dmgr`. You can override it with `--root` or the `DMGR_ROOT` environment variable.
 
 `dmgr` creates managed entries by default. In managed mode, the workspace is `DMGR_ROOT/entries/<name>/workspace`. If you want to reuse an existing project directory, pass `--workspace /path/to/project`.
+
+`dmgr import <path>` imports external Docker workspaces. If `<path>` itself contains a `Dockerfile`, `dmgr` imports it as a single external entry named after the directory. Otherwise `dmgr` scans the immediate child directories under `<path>` and imports each child that contains a `Dockerfile`.
+
+During import, `dmgr` also inspects `Dockerfile` `FROM ...` references. If a base image name matches another imported entry or an existing local entry, `dmgr` stores it in `depends_on`.
+
+Build commands use the recorded dependency graph:
+
+- `dmgr build <name>` builds the requested entry after its dependencies
+- `dmgr build --autobuild` builds only `autobuild = true` entries, still respecting dependencies
+- `dmgr build-all` builds every recorded entry in dependency order
+
+Generated scripts should use `#!/usr/bin/env sh` or `#!/usr/bin/env bash`. The default configured shell is `sh`. If an older entry still records a missing absolute shell path such as `/bin/sh`, `dmgr` falls back to the basename and resolves it from `PATH`.
 
 `dmgr run <name>` resolves the run command in two steps:
 
@@ -28,6 +40,8 @@ Each run prints the chosen scope before executing, for example `default` or the 
 ```bash
 dmgr entry create dev --autobuild
 dmgr entry create dev --workspace /path/to/project
+dmgr import ../Dockerfile
+dmgr import ../Dockerfile/dev
 dmgr entry list
 dmgr file edit dev
 dmgr script edit dev
@@ -35,10 +49,12 @@ dmgr cmd edit dev
 dmgr cmd edit dev --cwd
 dmgr cmd edit dev --workspace /path/to/project
 dmgr build dev
+dmgr build graphar-arch-dev
+dmgr build --autobuild
+dmgr build-all
 dmgr rm dev
 dmgr rm dev --yes
 dmgr run dev
-dmgr build --autobuild
 dmgr init systemd
 dmgr init openrc
 ```

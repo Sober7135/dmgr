@@ -19,6 +19,9 @@ pub enum Commands {
         #[command(subcommand)]
         command: EntryCommands,
     },
+    Import {
+        path: PathBuf,
+    },
     File {
         #[command(subcommand)]
         command: FileCommands,
@@ -36,6 +39,7 @@ pub enum Commands {
         #[arg(long)]
         autobuild: bool,
     },
+    BuildAll,
     Rm {
         name: String,
         #[arg(long)]
