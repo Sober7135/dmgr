@@ -7,7 +7,10 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
 use clap::Parser;
@@ -218,8 +221,7 @@ impl App {
         match (name, autobuild) {
             (Some(name), false) => {
                 let entries = self.load_entries(false)?;
-                let plan = resolve_build_plan(&entries, &[name])?;
-                self.execute_build_plan(&entries, &plan)
+                self.execute_build_targets(&entries, &[name])
             }
             (None, true) => {
                 let entries = self.load_entries(false)?;
@@ -231,8 +233,7 @@ impl App {
                 if targets.is_empty() {
                     return Ok(());
                 }
-                let plan = resolve_build_plan(&entries, &targets)?;
-                self.execute_build_plan(&entries, &plan)
+                self.execute_build_targets(&entries, &targets)
             }
             (Some(_), true) => bail!("pass either a name or --autobuild, not both"),
             (None, false) => bail!("missing build target, pass <name> or --autobuild"),
@@ -249,8 +250,7 @@ impl App {
             .iter()
             .map(|entry| entry.config.name.clone())
             .collect::<Vec<_>>();
-        let plan = resolve_build_plan(&entries, &targets)?;
-        self.execute_build_plan(&entries, &plan)
+        self.execute_build_targets(&entries, &targets)
     }
 
     fn handle_run(&self, name: &str) -> Result<()> {
@@ -449,26 +449,9 @@ impl App {
         Ok(())
     }
 
-    fn execute_build_plan(&self, entries: &[EntrySummary], plan: &[String]) -> Result<()> {
-        let by_name = entries
-            .iter()
-            .map(|entry| (entry.config.name.as_str(), entry))
-            .collect::<HashMap<_, _>>();
-
-        for name in plan {
-            let entry = by_name
-                .get(name.as_str())
-                .with_context(|| format!("missing build entry `{name}` in execution plan"))?;
-            self.execute_script(
-                &entry.paths,
-                &entry.config,
-                ScriptKind::Build,
-                &entry.paths.build_script,
-                &entry.config.workspace,
-            )?;
-        }
-
-        Ok(())
+    fn execute_build_targets(&self, entries: &[EntrySummary], targets: &[String]) -> Result<()> {
+        let graph = build_execution_graph(entries, targets)?;
+        execute_build_graph(graph)
     }
 
     fn entry_paths(&self, name: &str) -> EntryPaths {
@@ -537,6 +520,41 @@ struct ImportSource {
     workspace: PathBuf,
     build_script: Option<PathBuf>,
     depends_on: Vec<String>,
+}
+
+#[derive(Clone)]
+struct BuildNode {
+    entry: EntrySummary,
+    dependencies: Vec<String>,
+    dependents: Vec<String>,
+    remaining_dependencies: usize,
+    state: BuildNodeState,
+}
+
+#[derive(Clone)]
+enum BuildNodeState {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+    Skipped,
+}
+
+struct BuildExecutionGraph {
+    order: Vec<String>,
+    nodes: HashMap<String, BuildNode>,
+}
+
+struct BuildTaskResult {
+    name: String,
+    duration: Duration,
+    log_path: PathBuf,
+    outcome: BuildTaskOutcome,
+}
+
+enum BuildTaskOutcome {
+    Succeeded,
+    Failed(String),
 }
 
 fn default_root() -> Option<PathBuf> {
@@ -692,6 +710,186 @@ fn resolve_build_plan(entries: &[EntrySummary], targets: &[String]) -> Result<Ve
     Ok(plan)
 }
 
+fn build_execution_graph(
+    entries: &[EntrySummary],
+    targets: &[String],
+) -> Result<BuildExecutionGraph> {
+    let order = resolve_build_plan(entries, targets)?;
+    let selected = order.iter().cloned().collect::<HashSet<_>>();
+    let by_name = entries
+        .iter()
+        .map(|entry| (entry.config.name.clone(), entry.clone()))
+        .collect::<HashMap<_, _>>();
+    let mut nodes = HashMap::new();
+
+    for name in &order {
+        let entry = by_name
+            .get(name)
+            .with_context(|| format!("entry `{name}` not found"))?
+            .clone();
+        let dependencies = entry
+            .config
+            .depends_on
+            .iter()
+            .filter(|dependency| selected.contains(*dependency))
+            .cloned()
+            .collect::<Vec<_>>();
+        let remaining_dependencies = dependencies.len();
+        nodes.insert(
+            name.clone(),
+            BuildNode {
+                entry,
+                dependencies,
+                dependents: Vec::new(),
+                remaining_dependencies,
+                state: BuildNodeState::Pending,
+            },
+        );
+    }
+
+    for name in &order {
+        let dependencies = nodes
+            .get(name)
+            .map(|node| node.dependencies.clone())
+            .with_context(|| format!("missing build node `{name}`"))?;
+        for dependency in dependencies {
+            let dependency_node = nodes
+                .get_mut(&dependency)
+                .with_context(|| format!("missing dependency node `{dependency}`"))?;
+            dependency_node.dependents.push(name.clone());
+        }
+    }
+
+    Ok(BuildExecutionGraph { order, nodes })
+}
+
+fn execute_build_graph(mut graph: BuildExecutionGraph) -> Result<()> {
+    let order_index = graph
+        .order
+        .iter()
+        .enumerate()
+        .map(|(index, name)| (name.clone(), index))
+        .collect::<HashMap<_, _>>();
+    let mut ready = graph
+        .order
+        .iter()
+        .filter(|name| {
+            graph
+                .nodes
+                .get(*name)
+                .is_some_and(|node| node.remaining_dependencies == 0)
+        })
+        .cloned()
+        .collect::<Vec<String>>();
+    let max_jobs = build_jobs();
+    let (tx, rx) = mpsc::channel::<BuildTaskResult>();
+    let mut running = 0usize;
+
+    while !ready.is_empty() || running > 0 {
+        while running < max_jobs && !ready.is_empty() {
+            let name = ready.remove(0);
+            let Some(node) = graph.nodes.get_mut(&name) else {
+                continue;
+            };
+            if !matches!(node.state, BuildNodeState::Pending) {
+                continue;
+            }
+
+            node.state = BuildNodeState::Running;
+            print_build_status("start", &name, None)?;
+
+            let entry = node.entry.clone();
+            let tx = tx.clone();
+            thread::spawn(move || {
+                let result = execute_build_task(entry);
+                let _ = tx.send(result);
+            });
+            running += 1;
+        }
+
+        let result = rx
+            .recv()
+            .context("build worker channel closed unexpectedly")?;
+        running -= 1;
+
+        match result.outcome {
+            BuildTaskOutcome::Succeeded => {
+                if let Some(node) = graph.nodes.get_mut(&result.name) {
+                    node.state = BuildNodeState::Succeeded;
+                }
+                print_build_status(
+                    "done",
+                    &result.name,
+                    Some(&format_duration(result.duration)),
+                )?;
+
+                let dependents = graph
+                    .nodes
+                    .get(&result.name)
+                    .map(|node| node.dependents.clone())
+                    .unwrap_or_default();
+                let mut newly_ready = Vec::new();
+                for dependent in dependents {
+                    let Some(node) = graph.nodes.get_mut(&dependent) else {
+                        continue;
+                    };
+                    if !matches!(node.state, BuildNodeState::Pending) {
+                        continue;
+                    }
+                    if node.remaining_dependencies > 0 {
+                        node.remaining_dependencies -= 1;
+                    }
+                    if node.remaining_dependencies == 0 {
+                        newly_ready.push(dependent);
+                    }
+                }
+                insert_ready_nodes(&mut ready, newly_ready, &order_index);
+            }
+            BuildTaskOutcome::Failed(message) => {
+                if let Some(node) = graph.nodes.get_mut(&result.name) {
+                    node.state = BuildNodeState::Failed;
+                }
+                print_build_status(
+                    "fail",
+                    &result.name,
+                    Some(&format!("{message}; log={}", result.log_path.display())),
+                )?;
+
+                let dependents = graph
+                    .nodes
+                    .get(&result.name)
+                    .map(|node| node.dependents.clone())
+                    .unwrap_or_default();
+                skip_blocked_dependents(&mut graph.nodes, &dependents, &result.name)?;
+                ready.retain(|name| {
+                    graph
+                        .nodes
+                        .get(name)
+                        .is_some_and(|node| matches!(node.state, BuildNodeState::Pending))
+                });
+            }
+        }
+    }
+
+    print_build_summary(&graph.nodes)?;
+
+    let failed = graph
+        .nodes
+        .values()
+        .filter(|node| matches!(node.state, BuildNodeState::Failed))
+        .count();
+    let skipped = graph
+        .nodes
+        .values()
+        .filter(|node| matches!(node.state, BuildNodeState::Skipped))
+        .count();
+    if failed > 0 {
+        bail!("build failed: {failed} failed, {skipped} skipped");
+    }
+
+    Ok(())
+}
+
 fn visit_build_dependencies(
     name: &str,
     entries: &[EntrySummary],
@@ -720,6 +918,154 @@ fn visit_build_dependencies(
     visited.insert(name.to_string());
     plan.push(name.to_string());
     Ok(())
+}
+
+fn execute_build_task(entry: EntrySummary) -> BuildTaskResult {
+    let log_path = entry.paths.root.join("build.last.log");
+    let started_at = Instant::now();
+    let outcome =
+        execute_build_task_inner(&entry, &log_path).unwrap_or_else(BuildTaskOutcome::Failed);
+
+    BuildTaskResult {
+        name: entry.config.name.clone(),
+        duration: started_at.elapsed(),
+        log_path,
+        outcome,
+    }
+}
+
+fn execute_build_task_inner(
+    entry: &EntrySummary,
+    log_path: &Path,
+) -> std::result::Result<BuildTaskOutcome, String> {
+    let Some(parent) = log_path.parent() else {
+        return Err(format!("invalid build log path {}", log_path.display()));
+    };
+    fs::create_dir_all(parent)
+        .map_err(|err| format!("failed to create {}: {err}", parent.display()))?;
+
+    let mut header = fs::File::create(log_path)
+        .map_err(|err| format!("failed to create build log {}: {err}", log_path.display()))?;
+    writeln!(
+        header,
+        "# dmgr build log\n# entry={}\n# workspace={}\n# script={}\n",
+        entry.config.name,
+        entry.config.workspace.display(),
+        entry.paths.build_script.display()
+    )
+    .map_err(|err| format!("failed to write build log {}: {err}", log_path.display()))?;
+    let stdout = header.try_clone().map_err(|err| {
+        format!(
+            "failed to clone build log handle {}: {err}",
+            log_path.display()
+        )
+    })?;
+    let stderr = header;
+
+    let shell = resolve_shell_command(&entry.config.shell);
+    let status = Command::new(&shell)
+        .arg(&entry.paths.build_script)
+        .current_dir(&entry.config.workspace)
+        .env("DMGR_ENTRY_NAME", &entry.config.name)
+        .env("DMGR_ENTRY_ROOT", &entry.paths.root)
+        .env("DMGR_ENTRY_WORKSPACE", &entry.config.workspace)
+        .env("DMGR_CMD_PATH", &entry.paths.build_script)
+        .env("DMGR_RUN_DIR", &entry.config.workspace)
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .status()
+        .map_err(|err| {
+            format!(
+                "failed to execute build script for entry `{}` with shell {}: {err}",
+                entry.config.name,
+                shell.display()
+            )
+        })?;
+
+    if status.success() {
+        Ok(BuildTaskOutcome::Succeeded)
+    } else {
+        Ok(BuildTaskOutcome::Failed(format!("exit status {status}")))
+    }
+}
+
+fn insert_ready_nodes(
+    ready: &mut Vec<String>,
+    mut newly_ready: Vec<String>,
+    order_index: &HashMap<String, usize>,
+) {
+    newly_ready.sort_by_key(|name| order_index.get(name).copied().unwrap_or(usize::MAX));
+    ready.extend(newly_ready);
+}
+
+fn skip_blocked_dependents(
+    nodes: &mut HashMap<String, BuildNode>,
+    dependents: &[String],
+    blocked_by: &str,
+) -> Result<()> {
+    for dependent in dependents {
+        let Some(node) = nodes.get_mut(dependent) else {
+            continue;
+        };
+
+        if !matches!(node.state, BuildNodeState::Pending) {
+            continue;
+        }
+
+        node.state = BuildNodeState::Skipped;
+        print_build_status(
+            "skip",
+            dependent,
+            Some(&format!("blocked by `{blocked_by}`")),
+        )?;
+        let descendants = node.dependents.clone();
+        skip_blocked_dependents(nodes, &descendants, blocked_by)?;
+    }
+
+    Ok(())
+}
+
+fn print_build_status(status: &str, name: &str, detail: Option<&str>) -> Result<()> {
+    let mut stdout = io::stdout().lock();
+    match detail {
+        Some(detail) => writeln!(stdout, "[{status}] {name} {detail}"),
+        None => writeln!(stdout, "[{status}] {name}"),
+    }
+    .context("failed to print build status")
+}
+
+fn print_build_summary(nodes: &HashMap<String, BuildNode>) -> Result<()> {
+    let succeeded = nodes
+        .values()
+        .filter(|node| matches!(node.state, BuildNodeState::Succeeded))
+        .count();
+    let failed = nodes
+        .values()
+        .filter(|node| matches!(node.state, BuildNodeState::Failed))
+        .count();
+    let skipped = nodes
+        .values()
+        .filter(|node| matches!(node.state, BuildNodeState::Skipped))
+        .count();
+    let mut stdout = io::stdout().lock();
+    writeln!(
+        stdout,
+        "[summary] succeeded={succeeded} failed={failed} skipped={skipped}"
+    )
+    .context("failed to print build summary")
+}
+
+fn format_duration(duration: Duration) -> String {
+    format!("{:.2?}", duration)
+}
+
+fn build_jobs() -> usize {
+    std::env::var("DMGR_BUILD_JOBS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|jobs| *jobs > 0)
+        .or_else(|| thread::available_parallelism().ok().map(usize::from))
+        .unwrap_or(1)
 }
 
 fn confirm_rm(paths: &EntryPaths, config: &EntryConfig) -> Result<()> {

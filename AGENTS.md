@@ -28,6 +28,7 @@
 
 - Add integration coverage in `tests/cli.rs` for non-trivial behavior changes; keep pure model or serialization tests close to the module.
 - Cover dependency-aware behavior explicitly when changing `import`, `build`, `build --autobuild`, or `build-all`.
+- When touching build execution, cover parallel-ready nodes, failure propagation, and the user-facing status output contract.
 - Use behavior-based test names such as `run_uses_cwd_override_when_present`.
 - Avoid depending on a real Docker daemon in tests. Prefer temp directories, stub binaries, and small shell scripts.
 
@@ -43,4 +44,5 @@
 - `run.sh` is the default run command, while `cmd-overrides/` stores path-scoped overrides. Preserve the `default` fallback behavior when changing run resolution logic.
 - Imported entries use `managed = false` and may infer `depends_on` from `Dockerfile` `FROM ...` references when the base image name matches another local entry.
 - Build ordering now comes from the recorded dependency graph. Keep `build <name>`, `build --autobuild`, and `build-all` consistent when touching dependency resolution.
+- Build execution may run independent nodes in parallel. Preserve dependency barriers, keep terminal output concise, and write detailed logs to `DMGR_ROOT/entries/<name>/build.last.log`.
 - Generated scripts should stay portable across environments; use `#!/usr/bin/env sh` or `#!/usr/bin/env bash`, and avoid assuming `/bin/sh` exists.

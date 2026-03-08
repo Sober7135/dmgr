@@ -2,6 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 use assert_cmd::prelude::*;
 #[cfg(unix)]
@@ -389,9 +390,138 @@ fn build_all_builds_all_entries_in_dependency_order() {
         .map(str::to_string)
         .collect();
     assert_eq!(lines.len(), 3);
-    assert_eq!(lines[0], "dev");
-    assert_eq!(lines[1], "graphar-arch-dev");
-    assert_eq!(lines[2], "tools");
+    let dev_index = lines
+        .iter()
+        .position(|line| line == "dev")
+        .expect("dev built");
+    let app_index = lines
+        .iter()
+        .position(|line| line == "graphar-arch-dev")
+        .expect("app built");
+    let tools_index = lines
+        .iter()
+        .position(|line| line == "tools")
+        .expect("tools built");
+    assert!(dev_index < app_index);
+    assert_ne!(tools_index, app_index);
+}
+
+#[test]
+fn build_all_runs_independent_entries_in_parallel() {
+    let tempdir = TempDir::new().expect("create tempdir");
+    let root = tempdir.path().join("dmgr");
+    let import_root = tempdir.path().join("dockerfiles");
+    fs::create_dir_all(&import_root).expect("create import root");
+
+    for name in ["alpha", "beta"] {
+        let workspace = create_import_workspace(&import_root, name);
+        fs::write(
+            workspace.join("build.sh"),
+            "#!/usr/bin/env sh\nset -eu\nsleep 1\n",
+        )
+        .expect("write build script");
+    }
+
+    let mut import = bin();
+    set_root(import.arg("import").arg(&import_root), &root);
+    import.assert().success();
+
+    let mut build_all = bin();
+    set_root(build_all.arg("build-all"), &root);
+    build_all.env("DMGR_BUILD_JOBS", "2");
+
+    let started_at = Instant::now();
+    build_all.assert().success();
+    let elapsed = started_at.elapsed();
+
+    assert!(
+        elapsed < Duration::from_millis(1800),
+        "elapsed: {elapsed:?}"
+    );
+}
+
+#[test]
+fn build_output_shows_status_without_raw_build_logs() {
+    let tempdir = TempDir::new().expect("create tempdir");
+    let root = tempdir.path().join("dmgr");
+    let import_root = tempdir.path().join("dockerfiles");
+    let workspace = create_import_workspace(&import_root, "alpha");
+    fs::write(
+        workspace.join("build.sh"),
+        "#!/usr/bin/env sh\nset -eu\necho hidden-build-output\n",
+    )
+    .expect("write build script");
+
+    let mut import = bin();
+    set_root(import.arg("import").arg(&workspace), &root);
+    import.assert().success();
+
+    let mut build = bin();
+    set_root(build.arg("build").arg("alpha"), &root);
+    let assert = build.assert().success();
+    let output = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
+
+    assert!(output.contains("[start] alpha"));
+    assert!(output.contains("[done] alpha"));
+    assert!(output.contains("[summary] succeeded=1 failed=0 skipped=0"));
+    assert!(!output.contains("hidden-build-output"));
+}
+
+#[test]
+fn build_failure_is_reported_and_dependents_are_skipped() {
+    let tempdir = TempDir::new().expect("create tempdir");
+    let root = tempdir.path().join("dmgr");
+    let import_root = tempdir.path().join("dockerfiles");
+    let success_log = tempdir.path().join("success.log");
+    fs::create_dir_all(&import_root).expect("create import root");
+
+    let dev = create_import_workspace(&import_root, "dev");
+    fs::write(
+        dev.join("build.sh"),
+        "#!/usr/bin/env sh\nset -eu\necho hidden-failure-output\nexit 7\n",
+    )
+    .expect("write failing build");
+
+    let app = import_root.join("graphar-arch-dev");
+    fs::create_dir_all(&app).expect("create app workspace");
+    fs::write(app.join("Dockerfile"), "FROM dev\nRUN echo app\n").expect("write Dockerfile");
+    fs::write(
+        app.join("build.sh"),
+        "#!/usr/bin/env sh\nset -eu\necho should-not-run\n",
+    )
+    .expect("write app build");
+
+    let tools = create_import_workspace(&import_root, "tools");
+    fs::write(
+        tools.join("build.sh"),
+        format!(
+            "#!/usr/bin/env sh\nset -eu\necho tools >> {}\n",
+            success_log.display()
+        ),
+    )
+    .expect("write tools build");
+
+    let mut import = bin();
+    set_root(import.arg("import").arg(&import_root), &root);
+    import.assert().success();
+
+    let mut build_all = bin();
+    set_root(build_all.arg("build-all"), &root);
+    build_all.env("DMGR_BUILD_JOBS", "2");
+    let assert = build_all.assert().failure();
+    let output = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
+
+    assert!(output.contains("[fail] dev"));
+    assert!(output.contains("[skip] graphar-arch-dev blocked by `dev`"));
+    assert!(output.contains("[summary]"));
+    assert!(!output.contains("hidden-failure-output"));
+    assert_eq!(
+        fs::read_to_string(&success_log).expect("read success log"),
+        "tools\n"
+    );
+    let failure_log =
+        fs::read_to_string(root.join("entries/dev/build.last.log")).expect("read failure log");
+    assert!(failure_log.contains("hidden-failure-output"));
 }
 
 #[test]
@@ -618,10 +748,14 @@ fn build_autobuild_runs_entries_in_order() {
         .collect();
 
     assert_eq!(lines.len(), 2);
-    assert!(lines[0].starts_with(&root.join("entries/alpha/workspace").display().to_string()));
-    assert!(lines[1].starts_with(&workspace_b.display().to_string()));
-    assert!(lines[0].contains("build -t alpha -f Dockerfile ."));
-    assert!(lines[1].contains("build -t beta -f Dockerfile ."));
+    assert!(lines.iter().any(|line| {
+        line.starts_with(&root.join("entries/alpha/workspace").display().to_string())
+            && line.contains("build -t alpha -f Dockerfile .")
+    }));
+    assert!(lines.iter().any(|line| {
+        line.starts_with(&workspace_b.display().to_string())
+            && line.contains("build -t beta -f Dockerfile .")
+    }));
 }
 
 #[test]

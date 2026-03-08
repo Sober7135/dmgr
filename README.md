@@ -20,11 +20,23 @@ By default `DMGR_ROOT` is resolved as `$HOME/.config/dmgr`. You can override it 
 
 During import, `dmgr` also inspects `Dockerfile` `FROM ...` references. If a base image name matches another imported entry or an existing local entry, `dmgr` stores it in `depends_on`.
 
+Current limitation for imported git repositories:
+
+- `workspace` points at the external directory, so `dmgr file edit <name>` updates the source repository `Dockerfile`
+- `build.sh` is copied into `DMGR_ROOT/entries/<name>/build.sh` during import, so `dmgr script edit <name>` updates the local dmgr copy instead of the source repository
+- `dmgr` does not currently provide native git sync helpers; if you need changes tracked by the source repository, update files inside the repo directly and use git there
+
+This ownership model may be revised later so imported entries can use source `build.sh` files more directly.
+
 Build commands use the recorded dependency graph:
 
 - `dmgr build <name>` builds the requested entry after its dependencies
 - `dmgr build --autobuild` builds only `autobuild = true` entries, still respecting dependencies
 - `dmgr build-all` builds every recorded entry in dependency order
+
+Independent build nodes can run in parallel. By default `dmgr` uses the local available parallelism. You can override the worker count with `DMGR_BUILD_JOBS=<n>`.
+
+Build commands no longer stream raw `docker build` output directly to the terminal. Instead they print status lines such as `start`, `done`, `fail`, and `skip`. Each build writes its full stdout and stderr to `DMGR_ROOT/entries/<name>/build.last.log`.
 
 Generated scripts should use `#!/usr/bin/env sh` or `#!/usr/bin/env bash`. The default configured shell is `sh`. If an older entry still records a missing absolute shell path such as `/bin/sh`, `dmgr` falls back to the basename and resolves it from `PATH`.
 
