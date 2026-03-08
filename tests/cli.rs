@@ -39,6 +39,20 @@ fn write_script(path: &Path, content: &str) {
     make_executable(path);
 }
 
+fn shell_path() -> PathBuf {
+    std::env::var_os("PATH")
+        .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
+        .into_iter()
+        .flatten()
+        .map(|dir| dir.join("sh"))
+        .find(|path| path.is_file())
+        .expect("find sh in PATH")
+}
+
+fn shell_script(body: &str) -> String {
+    format!("#!{}\nset -eu\n{body}", shell_path().display())
+}
+
 fn run_with_stdin(command: &mut Command, input: &str) -> std::process::Output {
     let mut child = command
         .stdin(Stdio::piped())
@@ -456,10 +470,7 @@ fn edit_file_uses_editor_from_environment() {
 
     fs::write(
         &editor,
-        format!(
-            "#!/usr/bin/env sh\nset -eu\necho \"$1\" > {}\n",
-            editor_log.display()
-        ),
+        shell_script(&format!("echo \"$1\" > {}\n", editor_log.display())),
     )
     .expect("write editor");
     make_executable(&editor);
@@ -493,10 +504,7 @@ fn cmd_edit_with_cwd_creates_override_from_default() {
 
     write_script(
         &editor,
-        &format!(
-            "#!/usr/bin/env sh\nset -eu\necho \"$1\" > {}\n",
-            editor_log.display()
-        ),
+        &shell_script(&format!("echo \"$1\" > {}\n", editor_log.display())),
     );
 
     let mut create = bin();
@@ -562,10 +570,10 @@ fn build_autobuild_runs_entries_in_order() {
 
     fs::write(
         &docker,
-        format!(
-            "#!/usr/bin/env sh\nset -eu\nprintf '%s|%s\\n' \"$PWD\" \"$*\" >> {}\n",
+        shell_script(&format!(
+            "printf '%s|%s\\n' \"$PWD\" \"$*\" >> {}\n",
             log.display()
-        ),
+        )),
     )
     .expect("write docker stub");
     make_executable(&docker);
@@ -661,7 +669,8 @@ fn run_uses_cwd_override_when_present() {
     write_script(
         &editor,
         &format!(
-            "#!/usr/bin/env sh\nset -eu\ncat <<'EOF' > \"$1\"\n#!/usr/bin/env sh\nset -eu\nprintf 'override|%s\\n' \"$PWD\" >> {}\nEOF\n",
+            "{}cat <<'EOF' > \"$1\"\n#!/usr/bin/env sh\nset -eu\nprintf 'override|%s\\n' \"$PWD\" >> {}\nEOF\n",
+            shell_script(""),
             log.display()
         ),
     );

@@ -11,9 +11,9 @@ pub fn render_init_script(system: InitSystem, dmgr_bin: &str, root: &Path) -> St
 
 fn render_systemd(dmgr_bin: &str, root: &Path) -> String {
     format!(
-        "[Unit]\nDescription=dmgr autobuild\nAfter=network-online.target docker.service\nWants=network-online.target\n\n[Service]\nType=oneshot\nEnvironment=DMGR_ROOT={}\nExecStart={} build --autobuild\n\n[Install]\nWantedBy=multi-user.target\n",
+        "[Unit]\nDescription=dmgr autobuild\nAfter=network-online.target docker.service\nWants=network-online.target docker.service\n\n[Service]\nType=oneshot\nExecStart={} --root {} build --autobuild\n\n[Install]\nWantedBy=multi-user.target\n",
+        dmgr_bin,
         root.display(),
-        dmgr_bin
     )
 }
 
@@ -37,8 +37,8 @@ mod tests {
     fn renders_systemd_template() {
         let rendered =
             render_init_script(InitSystem::Systemd, "/usr/bin/dmgr", Path::new("/tmp/dmgr"));
-        assert!(rendered.contains("ExecStart=/usr/bin/dmgr build --autobuild"));
-        assert!(rendered.contains("Environment=DMGR_ROOT=/tmp/dmgr"));
+        assert!(rendered.contains("ExecStart=/usr/bin/dmgr --root /tmp/dmgr build --autobuild"));
+        assert!(rendered.contains("Wants=network-online.target docker.service"));
     }
 
     #[test]
