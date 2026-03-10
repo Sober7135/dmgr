@@ -780,7 +780,7 @@ fn run_uses_default_cmd_when_no_override_matches() {
     write_script(
         &default_run,
         &format!(
-            "#!/usr/bin/env sh\nset -eu\nprintf 'default|%s|%s\\n' \"$PWD\" \"$DMGR_RUN_DIR\" >> {}\n",
+            "#!/usr/bin/env sh\nset -eu\nprintf 'default|%s\\n' \"$PWD\" >> {}\n",
             log.display()
         ),
     );
@@ -792,11 +792,9 @@ fn run_uses_default_cmd_when_no_override_matches() {
     let output = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
 
     assert!(output.contains("using cmd scope: default"));
-    let workspace = root.join("entries/dev/workspace");
-    let entry_root = root.join("entries/dev");
     assert_eq!(
         fs::read_to_string(&log).expect("read log"),
-        format!("default|{}|{}\n", entry_root.display(), workspace.display())
+        format!("default|{}\n", other_dir.display())
     );
 }
 
@@ -811,7 +809,7 @@ fn run_uses_cwd_override_when_present() {
     write_script(
         &editor,
         &format!(
-            "{}cat <<'EOF' > \"$1\"\n#!/usr/bin/env sh\nset -eu\nprintf 'override|%s|%s\\n' \"$PWD\" \"$DMGR_RUN_DIR\" >> {}\nEOF\n",
+            "{}cat <<'EOF' > \"$1\"\n#!/usr/bin/env sh\nset -eu\nprintf 'override|%s\\n' \"$PWD\" >> {}\nEOF\n",
             shell_script(""),
             log.display()
         ),
@@ -843,9 +841,8 @@ fn run_uses_cwd_override_when_present() {
         "using cmd scope: {}",
         scope.canonicalize().expect("canonical").display()
     )));
-    let entry_root = root.join("entries/dev");
     assert_eq!(
         fs::read_to_string(&log).expect("read log"),
-        format!("override|{}|{}\n", entry_root.display(), scope.display())
+        format!("override|{}\n", scope.display())
     );
 }

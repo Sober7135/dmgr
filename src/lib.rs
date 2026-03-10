@@ -3,6 +3,7 @@ mod editor;
 mod entry;
 
 use std::collections::{HashMap, HashSet};
+use std::env::current_dir;
 use std::fs;
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
@@ -250,16 +251,9 @@ impl App {
         let paths = self.entry_paths(name);
         ensure_entry_exists(&paths)?;
         let config = EntryConfig::from_path(&paths.config)?;
-        let target = self.resolve_run_target(&paths, &config)?;
+        let target = self.resolve_run_target(&paths)?;
         println!("using cmd scope: {}", target.scope_label);
-        self.execute_script(
-            &paths,
-            &config,
-            ScriptKind::Run,
-            &target.script_path,
-            &paths.root,
-            &target.execution_dir,
-        )
+        self.execute_script(&paths, &config, ScriptKind::Run, &target.script_path)
     }
 
     fn handle_rm(&self, name: &str, yes: bool) -> Result<()> {
@@ -326,9 +320,9 @@ impl App {
         config: &EntryConfig,
         kind: ScriptKind,
         script_path: &Path,
-        current_dir: &Path,
-        run_dir: &Path,
     ) -> Result<()> {
+        let current_dir = current_dir()?;
+
         let shell = resolve_shell_command(&config.shell);
         let status = Command::new(&shell)
             .arg(script_path)
@@ -337,7 +331,6 @@ impl App {
             .env("DMGR_ENTRY_ROOT", &paths.root)
             .env("DMGR_ENTRY_WORKSPACE", &config.workspace)
             .env("DMGR_CMD_PATH", script_path)
-            .env("DMGR_RUN_DIR", run_dir)
             .status()
             .with_context(|| {
                 format!(
@@ -450,11 +443,7 @@ impl App {
         Ok(target)
     }
 
-    fn resolve_run_target(
-        &self,
-        paths: &EntryPaths,
-        config: &EntryConfig,
-    ) -> Result<ResolvedRunTarget> {
+    fn resolve_run_target(&self, paths: &EntryPaths) -> Result<ResolvedRunTarget> {
         let current_dir =
             std::env::current_dir().context("failed to determine current directory")?;
         let scope = canonicalize_scope(&current_dir).with_context(|| {
@@ -472,7 +461,6 @@ impl App {
                 return Ok(ResolvedRunTarget {
                     script_path,
                     scope_label: scope.display().to_string(),
-                    execution_dir: scope,
                 });
             }
         }
@@ -480,7 +468,6 @@ impl App {
         Ok(ResolvedRunTarget {
             script_path: paths.run_script.clone(),
             scope_label: "default".to_string(),
-            execution_dir: config.workspace.clone(),
         })
     }
 }
@@ -488,7 +475,6 @@ impl App {
 struct ResolvedRunTarget {
     script_path: PathBuf,
     scope_label: String,
-    execution_dir: PathBuf,
 }
 
 struct ImportSource {
@@ -946,7 +932,6 @@ fn execute_build_task_inner(
         .env("DMGR_ENTRY_ROOT", &entry.paths.root)
         .env("DMGR_ENTRY_WORKSPACE", &entry.config.workspace)
         .env("DMGR_CMD_PATH", &entry.paths.build_script)
-        .env("DMGR_RUN_DIR", &entry.config.workspace)
         .stdout(Stdio::from(stdout))
         .stderr(Stdio::from(stderr))
         .status()

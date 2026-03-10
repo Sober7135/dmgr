@@ -45,7 +45,7 @@ Generated scripts should use `#!/usr/bin/env sh` or `#!/usr/bin/env bash`. The d
 - if the current `cwd` exactly matches a stored override path, use that override
 - otherwise fall back to the default `run.sh`
 
-Run scripts execute with `$PWD` set to `DMGR_ROOT/entries/<name>`. The resolved workspace or cmd override scope is exposed as `DMGR_RUN_DIR`.
+Run scripts execute with `$PWD` set to the caller's current working directory.
 
 Each run prints the chosen scope before executing, for example `default` or the matched absolute path.
 
