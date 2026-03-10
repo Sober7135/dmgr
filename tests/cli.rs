@@ -78,6 +78,13 @@ fn make_executable(path: &Path) {
 }
 
 #[test]
+fn prints_version() {
+    let assert = bin().arg("--version").assert().success();
+    let output = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
+    assert_eq!(output.trim(), format!("dmgr {}", env!("CARGO_PKG_VERSION")));
+}
+
+#[test]
 fn create_entry_writes_expected_files() {
     let tempdir = TempDir::new().expect("create tempdir");
     let root = tempdir.path().join("dmgr");

@@ -4,6 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(name = "dmgr")]
+#[command(version)]
 #[command(about = "Manage local Docker development entries")]
 pub struct Cli {
     #[arg(long, global = true)]
