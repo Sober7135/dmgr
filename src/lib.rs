@@ -264,6 +264,7 @@ impl App {
             &config,
             ScriptKind::Run,
             &target.script_path,
+            &paths.root,
             &target.execution_dir,
         )
     }
@@ -351,17 +352,18 @@ impl App {
         config: &EntryConfig,
         kind: ScriptKind,
         script_path: &Path,
-        execution_dir: &Path,
+        current_dir: &Path,
+        run_dir: &Path,
     ) -> Result<()> {
         let shell = resolve_shell_command(&config.shell);
         let status = Command::new(&shell)
             .arg(script_path)
-            .current_dir(execution_dir)
+            .current_dir(current_dir)
             .env("DMGR_ENTRY_NAME", &config.name)
             .env("DMGR_ENTRY_ROOT", &paths.root)
             .env("DMGR_ENTRY_WORKSPACE", &config.workspace)
             .env("DMGR_CMD_PATH", script_path)
-            .env("DMGR_RUN_DIR", execution_dir)
+            .env("DMGR_RUN_DIR", run_dir)
             .status()
             .with_context(|| {
                 format!(

@@ -7,6 +7,7 @@
 
   outputs = { self, nixpkgs }:
     let
+      cargo_manifest = builtins.fromTOML (builtins.readFile ./Cargo.toml);
       systems = [
         "x86_64-linux"
         "aarch64-linux"
@@ -24,7 +25,7 @@
         {
           default = pkgs.rustPlatform.buildRustPackage {
             pname = "dmgr";
-            version = "0.1.0";
+            version = cargo_manifest.package.version;
             src = self;
             cargoLock.lockFile = ./Cargo.lock;
 
