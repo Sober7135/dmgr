@@ -81,7 +81,7 @@ fn make_executable(path: &Path) {
 fn prints_version() {
     let assert = bin().arg("--version").assert().success();
     let output = String::from_utf8(assert.get_output().stdout.clone()).expect("stdout");
-    assert_eq!(output.trim(), format!("dmgr {}", env!("CARGO_PKG_VERSION")));
+    assert_eq!(output.trim(), format!("dmgr {}", env!("DMGR_VERSION")));
 }
 
 #[test]
