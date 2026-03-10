@@ -69,22 +69,6 @@ dmgr build-all
 dmgr rm dev
 dmgr rm dev --yes
 dmgr run dev
-dmgr init systemd
-dmgr init openrc
 ```
 
 `dmgr rm <name>` asks for confirmation before removing `DMGR_ROOT/entries/<name>`. Use `--yes` for non-interactive removal. For external workspaces created with `--workspace`, the workspace directory itself is left untouched.
-
-## Boot Integration
-
-Render a `systemd` unit:
-
-```bash
-dmgr init systemd --dmgr-bin /usr/local/bin/dmgr > dmgr-autobuild.service
-```
-
-Render an `openrc` service:
-
-```bash
-dmgr init openrc --dmgr-bin /usr/local/bin/dmgr > dmgr-autobuild
-```

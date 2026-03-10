@@ -5,7 +5,7 @@
 - `src/lib.rs` is the main application layer. It handles command dispatch, entry management, import flow, dependency-aware build execution, script execution, and path resolution.
 - `src/cli.rs` defines the `clap` command model. Add new subcommands and flags here first.
 - `src/entry.rs` contains data models and path rules for entries, workspaces, dependency metadata, and command overrides.
-- `src/editor.rs` resolves `$VISUAL` / `$EDITOR`; `src/init.rs` renders `systemd` and `openrc` templates.
+- `src/editor.rs` resolves `$VISUAL` / `$EDITOR`.
 - `tests/cli.rs` holds the main integration tests for CLI behavior, file layout, and script execution.
 
 ## Build, Test, and Development Commands

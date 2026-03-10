@@ -849,27 +849,3 @@ fn run_uses_cwd_override_when_present() {
         format!("override|{}|{}\n", entry_root.display(), scope.display())
     );
 }
-
-#[test]
-fn init_openrc_writes_template_to_file() {
-    let tempdir = TempDir::new().expect("create tempdir");
-    let root = tempdir.path().join("dmgr");
-    let output = tempdir.path().join("dmgr-autobuild");
-
-    let mut command = bin();
-    set_root(
-        command
-            .arg("init")
-            .arg("openrc")
-            .arg("--dmgr-bin")
-            .arg("/usr/local/bin/dmgr")
-            .arg("--output")
-            .arg(&output),
-        &root,
-    );
-    command.assert().success();
-
-    let content = fs::read_to_string(&output).expect("read output");
-    assert!(content.contains("command=\"/usr/local/bin/dmgr\""));
-    assert!(content.contains(&format!("DMGR_ROOT={}", root.display())));
-}

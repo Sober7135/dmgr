@@ -1,7 +1,6 @@
 mod cli;
 mod editor;
 mod entry;
-mod init;
 
 use std::collections::{HashMap, HashSet};
 use std::fs;
@@ -16,11 +15,10 @@ use anyhow::{Context, Result, bail};
 use clap::Parser;
 
 use crate::cli::{
-    Cli, CmdCommands, Commands, EntryCommands, FileCommands, InitSystem, PathKind, ScriptCommands,
+    Cli, CmdCommands, Commands, EntryCommands, FileCommands, PathKind, ScriptCommands,
 };
 use crate::editor::Editor;
 use crate::entry::{CmdOverrideConfig, EntryConfig, EntryPaths, EntrySummary, ScriptKind};
-use crate::init::render_init_script;
 
 pub fn run() -> Result<()> {
     let cli = Cli::parse();
@@ -57,11 +55,6 @@ impl App {
             Commands::Rm { name, yes } => self.handle_rm(&name, yes),
             Commands::Run { name } => self.handle_run(&name),
             Commands::Path { name, kind } => self.handle_path(&name, kind),
-            Commands::Init {
-                system,
-                output,
-                dmgr_bin,
-            } => self.handle_init(system, output, dmgr_bin),
         }
     }
 
@@ -293,25 +286,6 @@ impl App {
             PathKind::File => println!("{}", paths.dockerfile_path(&config).display()),
             PathKind::Build => println!("{}", paths.build_script.display()),
             PathKind::Run => println!("{}", paths.run_script.display()),
-        }
-        Ok(())
-    }
-
-    fn handle_init(
-        &self,
-        system: InitSystem,
-        output: Option<PathBuf>,
-        dmgr_bin: String,
-    ) -> Result<()> {
-        let content = render_init_script(system, &dmgr_bin, &self.root);
-        match output {
-            Some(path) => write_string(&path, &content)?,
-            None => {
-                let mut stdout = io::stdout().lock();
-                stdout
-                    .write_all(content.as_bytes())
-                    .context("failed to write init template to stdout")?;
-            }
         }
         Ok(())
     }

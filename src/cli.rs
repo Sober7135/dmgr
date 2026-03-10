@@ -54,14 +54,6 @@ pub enum Commands {
         #[arg(value_enum, default_value_t = PathKind::Entry)]
         kind: PathKind,
     },
-    Init {
-        #[arg(value_enum)]
-        system: InitSystem,
-        #[arg(long)]
-        output: Option<PathBuf>,
-        #[arg(long, default_value = "dmgr")]
-        dmgr_bin: String,
-    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -114,10 +106,4 @@ pub enum PathKind {
     File,
     Build,
     Run,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
-pub enum InitSystem {
-    Systemd,
-    Openrc,
 }
